@@ -1,17 +1,24 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse, JSONResponse
-import stable_whisper as whisper
 import os, tempfile, torch
 
-# Giới hạn thread CPU cho Cloud Run free ổn định
+# Giới hạn thread CPU cho Cloud Run
 torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "1")))
 
 MODEL_NAME = os.getenv("WHISPER_MODEL", "small")  # small | medium
 LANG_DEFAULT = os.getenv("LANG_DEFAULT", "vi")
 
-# Load model 1 lần khi container khởi động
-model = whisper.load_model(MODEL_NAME)
 app = FastAPI()
+
+# ---- Lazy load stable-ts model ----
+model = None
+def get_model():
+    global model
+    if model is None:
+        import stable_whisper as whisper
+        model = whisper.load_model(MODEL_NAME)
+    return model
+# -----------------------------------
 
 def segments_to_words(result):
     words = []
@@ -47,7 +54,8 @@ def to_srt(segs):
 
 @app.get("/healthz")
 def health():
-    return {"ok": True, "model": MODEL_NAME}
+    # Không đụng tới model để server trả lời nhanh
+    return {"ok": True, "model_env": MODEL_NAME}
 
 @app.post("/transcribe")
 async def transcribe(
@@ -57,13 +65,16 @@ async def transcribe(
     word_timestamps: int = Form(1),
     output: str = Form("words")  # words | segments | srt
 ):
+    # Lúc này mới load model nếu chưa có
+    whisper_model = get_model()
+
     # Lưu file upload vào /tmp
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(await file.read())
         path = tmp.name
 
     # Gọi stable-ts
-    result = model.transcribe(
+    result = whisper_model.transcribe(
         path,
         language=language,
         vad=bool(use_vad),
